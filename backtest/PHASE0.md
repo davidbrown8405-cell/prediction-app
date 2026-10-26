@@ -1,81 +1,82 @@
-# Phase 0: Data Feasibility Gate
+# Phase 0: Data Feasibility Gate (rev 2: $0 budget)
 
-**Status: BLOCKED. No GO/NO-GO yet.** I have no evidence either way because the session
-couldn't reach any of the data sources.
+**Status: BLOCKED. No GO/NO-GO yet.** No data has been pulled, and nothing below is a measured result.
 
-## What blocked it
-- This cloud environment's network policy refused these hosts (proxy `403` on CONNECT):
-  `cdn.nba.com`, `stats.nba.com`, `api.the-odds-api.com`, `api.sportsgameodds.com`, `api.oddspapi.io`.
-- No `ODDS_API_KEY` is set. Historical odds need a **paid** Odds API plan.
-- I have **not** pulled any data and **no results are fabricated**. Everything below comes from
-  documentation, and the open items have to be checked against a live call.
+## Why it's blocked
+- The environment's network policy still refuses `cdn.nba.com`, `api.elections.kalshi.com` and
+  `api.oddspapi.io` (proxy 403 on CONNECT). The host allowlist change hasn't reached this session
+  yet. A new session may be needed after it's saved.
+- `ODDSPAPI_KEY` isn't present in the environment.
 
-## 1. Live odds history (The Odds API, documented and not yet verified)
-| Item | Documented | Still to verify with the probe |
+## What's ready
+All of these modules are in `phase0/`, with 18 unit tests in `tests/`.
+
+| Step | Module | What it does |
 |---|---|---|
-| Snapshot interval | 10 min from Jun 2020; **5 min since Sep 2022** (featured markets: h2h/spreads/totals) | Actual gaps on in-play snapshots |
-| In-play odds in historical snapshots | **Not stated clearly in the docs.** This is the key unknown. | Does an event still show up, with moving lines, after `commence_time`? |
-| Query semantics | Returns the closest snapshot **at or before** `date`, plus `previous_timestamp`/`next_timestamp` | — |
-| Cost | **10 credits × regions × markets** per call | `x-requests-used` header |
-| Pinnacle | Listed under the `eu` region | Whether Pinnacle has in-play NBA lines in history |
+| PBP | `pbp.py` | nba.com CDN PBP plus schedule lookup by date and tricodes. Uses `timeActual` as UTC. |
+| Triggers first | `triggers.py` | S6 candidates and S7 runs from PBP only. Each trigger gets the UTC window in which a price must be found. |
+| Kalshi | `kalshi.py` | Public client: `/historical/cutoff`, NBA series discovery (`KXNBA*`), events, markets, trades, 1-min candlesticks. Falls back from live to `/historical/*` routes. Computes in-play liquidity stats. |
+| OddsPapi | `oddspapi.py` | `/historical-odds` (≤3 books), a schema-agnostic snapshot flattener, quota-header capture, and in-play counts per book. |
+| Join | `align.py` | Backward as-of join of any price stream to PBP state. Flags `stale` but doesn't drop stale rows, since the score is still correct at halftime and during timeouts. |
+| Runner | `run_probe.py` | Runs one game end to end and writes `data/phase0/<gameId>/{triggers.csv, kalshi_trades_aligned.csv, oddspapi_aligned.csv, summary.json}`. |
 
-**Credit estimate for 3 seasons** (`python -m phase0.run_probe --estimate-only`):
-- One sport-wide historical call returns every NBA game in progress at that moment, so cost
-  scales with **game-window wall-clock**, not with the number of games.
-- Assumptions: `us` + `eu` regions, `spreads,totals`, which comes to **40 credits/call**. 5-min
-  snapshots across each game day's window (first tip to last final), about 210–235 game days per
-  season including playoffs.
-- **About 2.0M–3.0M credits for 3 seasons.** Dropping `eu` halves that, but loses Pinnacle.
-  Dropping `totals` also halves it, but the total-points split needs at least the pre-game total.
-- The single-game probe costs **about 1,200 credits**.
-- Per-event `/historical/.../events/{id}/odds` calls cost the same per call but cover only one
-  game, so they're strictly worse here.
+Run:
+`python -m phase0.run_probe --date 2026-10-23 --away HOU --home SAS`.
 
-**Fallbacks** (both unverified, and both hosts are blocked here):
-- **SportsGameOdds:** markets itself as having historical live odds. Interval and credit model
-  need checking.
-- **OddsPapi:** advertises historical odds with many books, including Pinnacle. Need to check
-  in-play depth and granularity.
+OddsPapi request cost: 1 `/historical-odds` call, plus 2 lookup calls (`/sports`, `/fixtures`)
+unless `--fixture-id` is passed.
 
-## 2. Play-by-play with wall-clock time
-- Primary: `cdn.nba.com/static/json/liveData/playbyplay/playbyplay_{gameId}.json`. Each action
-  is expected to carry `period`, `clock` (ISO duration), `scoreHome`/`scoreAway` and
-  **`timeActual`** (UTC). hoopR exposes this as `time_actual`, which corroborates it.
-  Still to verify: the field is populated for every action, and the files exist for 2023-24.
-- Fallback: `nba_api` PlayByPlayV3 (stats.nba.com) has game clock but **no wall-clock
-  timestamp**. Wall time would have to be interpolated, which is weak for S7's 5-min window.
+## Design change (implemented)
+PBP → S6/S7 triggers → prices fetched only inside trigger windows.
+- Kalshi is the primary backtest dataset.
+- OddsPapi is the sportsbook validation subset, fetched only for triggering games.
+- S6's favorite filter (closing spread ≤ −4) needs a pre-game line. `triggers.py` therefore emits
+  a superset (any team trailing by ≥8 in Q1–Q2), and the favorite filter is applied once the
+  pre-game line is known.
 
-## 3. Alignment test (code ready, not yet run)
-- `phase0/align.py` does an as-of join: each odds row gets the latest PBP event at or before the
-  book's `last_update`, falling back to snapshot time. Rows go stale after 180 s, and
-  pre-tip/post-final rows are excluded. This logic is unit-tested in `tests/test_align.py`.
-- `phase0/run_probe.py --game-id <id> --yes` walks every snapshot from tip to final for one game.
-  It writes `data/phase0/aligned_<id>.csv` and a summary with:
-  - median and max snapshot gap
-  - books seen, and in-play rows per book
-  - whether Pinnacle has in-play lines
-  - the correlation of the home live spread with the home margin, which should be strongly negative
-  - the join success rate
+## Rule interpretations: please confirm (fixed before any data is seen)
+1. **S7 "run ends":** the trigger fires at the scoring event where the net run first reaches N
+   within ≤180 s of game clock. Waiting for the opponent's next basket would be look-ahead and
+   would inflate run sizes.
+2. **S7 Q4 exclusion:** also applies to OT with under 2:00 left (same endgame-fouling logic).
+3. **S7 runs across a period break:** these count, using continuous elapsed game clock.
+4. **S6 "any snapshot":** with Kalshi, a "snapshot" is a trade. The bet is the first trade while
+   the deficit is still ≥ D in Q1–Q2.
 
-## Decision rule I'll apply once the probe runs
-- **GO** if all of these hold:
-  - in-play snapshots exist
-  - the median interval is ≤ 10 min
-  - at least one consistent book (ideally Pinnacle) is in-play in most snapshots
-  - `timeActual` is present
-  - spread-vs-margin correlation ≤ −0.8
-- **NO-GO / alternatives** if in-play isn't in the history, or the interval is > 10 min:
-  - switch to SportsGameOdds or OddsPapi history
-  - or record live odds going forward (a 2025-26+ prospective sample only)
-  - or narrow S6 to halftime lines, if a period/halftime market history exists
-- **Methodological caveat even on GO:** 5-min snapshots mean S7 bets go in up to 5 min after a
-  run. That's a fair test of "the line you could actually get", but it's coarse. Books also
-  suspend markets during runs, so missing in-play rows around runs should be expected and reported.
+## Documented facts and risks (from docs and third-party guides, not yet verified)
+- **Kalshi coverage is the critical risk.**
+  - Kalshi sports contracts launched in 2025. NBA game markets very likely don't exist for
+    **2023-24** and may only cover part of **2024-25**.
+  - Spread and total ladders show up in March–June 2026 data. Their start date is unknown, and
+    they may not exist before 2025-26.
+  - The probe counts `KXNBAGAME` events per season to settle this.
+  - If confirmed, the TRAIN/HOLDOUT seasons can't stay as specified. That's your call: options
+    are below.
+- **Kalshi spread ≠ sportsbook spread.** Kalshi spreads are a ladder of binary "wins by over
+  X.5" contracts, priced as probabilities, with no −110 vig. Grading uses the actual contract price.
+- **OddsPapi history reportedly starts around January 2026.** If true, it can only validate
+  2025-26 (the holdout) and later, never the train seasons.
+- **Free OddsPapi quota:** marketing says 250 requests. Whether that's monthly is unverified,
+  and the probe reads it from response headers.
+- **Pinnacle in-play NBA depth** is known to be limited, so the probe counts in-play snapshots per book.
+- **Sample game choice:** a completed **2026-27** game (Oct 23 2026, HOU @ SAS, which Kalshi lists
+  as settled) keeps the 2025-26 holdout untouched. If OddsPapi only keeps recent history, this
+  also gives it the best chance of having data.
 
-## To unblock
-1. Allow these hosts in the environment's network settings:
-   `cdn.nba.com`, `api.the-odds-api.com`, plus `api.sportsgameodds.com` and `api.oddspapi.io` for
-   the fallbacks. See https://code.claude.com/docs/en/cloud-environments#network-access.
-2. Provide `ODDS_API_KEY` (a paid plan) as an environment secret.
-3. Choose a sample game ID, then run:
-   `pip install -r requirements.txt && python -m phase0.run_probe --game-id <id> --yes`
+## GO criteria (applied when the probe runs)
+- **PBP:** `timeActual` present on every action and monotonic.
+- **Kalshi:**
+  - `KXNBAGAME` has in-play trades with a median gap of ≤ 60 s.
+  - The home-win price vs. home margin correlation is ≥ +0.8.
+  - Spread and total ladders exist; liquidity is reported either way.
+  - Seasons with coverage give enough games for a train set (n ≥ 200 bets per variation is
+    unlikely with a single season).
+- **OddsPapi:** in-play price changes appear after tip for at least one book. This is a bonus for
+  validation and doesn't block GO.
+
+## If coverage is short: options (your decision, not mine)
+- **A:** TRAIN = 2024-25 (partial) + 2025-26 first half, HOLDOUT = 2025-26 second half, then
+  2026-27 to date.
+- **B:** TRAIN = 2025-26, HOLDOUT = 2026-27 as it accrues (prospective).
+- **C:** Moneyline-only S6/S7 on Kalshi wherever spreads are missing. This changes the bet type,
+  so it would need re-registering.

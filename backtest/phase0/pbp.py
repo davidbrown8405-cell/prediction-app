@@ -40,3 +40,20 @@ def actions_to_frame(actions):
     })
     out["margin_home"] = out["score_home"] - out["score_away"]
     return out.sort_values(["utc_ts", "action_number"]).reset_index(drop=True)
+
+
+def fetch_schedule():
+    """Current-season league schedule (game ids, tricodes, UTC tip times)."""
+    body, _, _ = cached_get("https://cdn.nba.com/static/json/staticData/scheduleLeagueV2.json",
+                            headers=HEADERS)
+    return body["leagueSchedule"]
+
+
+def find_game_id(schedule, et_date, away, home):
+    """et_date 'YYYY-MM-DD' (US/Eastern game date), tricodes like 'HOU', 'SAS'."""
+    for day in schedule["gameDates"]:
+        for g in day["games"]:
+            if (g["awayTeam"]["teamTricode"] == away and g["homeTeam"]["teamTricode"] == home
+                    and g["gameDateEst"][:10] == et_date):
+                return g["gameId"]
+    raise LookupError(f"no game {away}@{home} on {et_date}")

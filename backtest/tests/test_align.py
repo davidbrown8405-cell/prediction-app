@@ -15,8 +15,7 @@ def _pbp():
 
 
 def _odds(times):
-    return pd.DataFrame({"snapshot_ts": [T(t) for t in times],
-                         "book_last_update": [T(t) for t in times], "line": -1.0})
+    return pd.DataFrame({"utc_ts": [T(t) for t in times], "price": 0.5})
 
 
 def test_asof_uses_latest_event_at_or_before():
@@ -32,11 +31,12 @@ def test_pregame_and_postgame_snapshots_fail_join():
 
 def test_stale_state_flagged():
     j = join_snapshots_to_state(_odds(["00:09:00"]), _pbp(), max_staleness_sec=180)
-    assert j["state_lag_sec"].iloc[0] == 240 and not j["join_ok"].iloc[0]
+    assert j["state_lag_sec"].iloc[0] == 240
+    assert j["join_ok"].iloc[0] and j["stale"].iloc[0] and j["margin_home"].iloc[0] == 8
 
 
-def test_book_last_update_preferred_over_snapshot_time():
-    o = _odds(["00:06:00"]).assign(book_last_update=[T("00:01:30")])
+def test_price_time_preferred_over_snapshot_time():
+    o = _odds(["00:01:30"]).assign(snapshot_ts=[T("00:06:00")])
     j = join_snapshots_to_state(o, _pbp())
     assert j["margin_home"].iloc[0] == 2  # price was set before the 10-2 score
 

@@ -2,3 +2,4 @@ pandas>=2.2
 requests
 pyyaml
 pytest
+tzdata
