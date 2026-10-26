@@ -1,0 +1,31 @@
+# Locked strategy rules. Pre-registered before any results were seen. Do not tune.
+seasons:
+  train: ["2023-24", "2024-25"]
+  holdout: ["2025-26"]
+
+s6_early_deficit_favorite:
+  max_pregame_spread: -4.0        # favorite = closing spread <= -4.0
+  deficit: 10                     # primary
+  deficit_variations: [8, 10, 12] # report all
+  periods: [1, 2]
+  one_bet_per_game: true
+
+s7_fade_the_run:
+  run_size: 10                    # primary
+  run_size_variations: [8, 10, 12]
+  max_run_game_clock_sec: 180     # run within <= 3:00 of game clock
+  max_wallclock_lag_sec: 300      # bet at first snapshot <= 5 min after run ends
+  exclude_q4_under_sec: 120       # skip Q4 with < 2:00 left
+  one_bet_per_game_per_team: true
+
+odds:
+  provider: the_odds_api
+  sport: basketball_nba
+  markets: [spreads, totals]
+  regions: [us, eu]               # eu needed for Pinnacle
+  primary_book: pinnacle
+  max_snapshot_interval_sec: 600  # Phase 0 gate
+
+alignment:
+  # snapshot is joined to the latest PBP event at or before its UTC timestamp
+  max_staleness_sec: 180
